@@ -1,0 +1,14 @@
+﻿dimensao,grupo,pessoas,casos_sinalizados,percentual_sinalizado,escore_medio_saida,fatores_de_destaque
+Department,IT,235,55,23.404,26.118,media de horas trabalhadas por mes
+Department,RandD,165,29,17.576,19.382,sem destaque
+Department,accounting,173,57,32.948,34.667,sem destaque
+Department,hr,145,39,26.897,29.617,sem destaque
+Department,management,130,18,13.846,16.344,sem destaque
+Department,marketing,179,41,22.905,24.981,tempo de empresa
+Department,product_mng,202,45,22.277,23.478,tempo de empresa
+Department,sales,812,191,23.522,25.863,tempo de empresa
+Department,support,414,93,22.464,25.057,sem destaque
+Department,technical,545,126,23.119,25.844,tempo de empresa
+salary,high,237,7,2.954,4.903,sem destaque
+salary,low,1480,433,29.257,31.683,sem destaque
+salary,medium,1283,254,19.797,22.115,tempo de empresa

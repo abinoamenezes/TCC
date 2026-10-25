@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.py[cod]
+.matplotlib/
+~$*.docx
+TCC_Abinoa_Menezes_atualizado.pdf
