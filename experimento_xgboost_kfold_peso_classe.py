@@ -5,6 +5,8 @@ principal. Em cada fold, scale_pos_weight recebe a razao FICOU/SAIU calculada
 somente no treinamento. Validacao e teste mantem a distribuicao original.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -28,7 +30,7 @@ RANDOM_STATE = 42
 NUM_FOLDS = 5
 MAX_ARVORES = 1000
 EARLY_STOPPING = 30
-ARQUIVO_RESULTADOS = "resultados_xgboost_peso_classe.csv"
+ARQUIVO_RESULTADOS = Path("resultados/experimentos/resultados_xgboost_peso_classe.csv")
 
 
 def criar_preprocessador(X: pd.DataFrame) -> ColumnTransformer:
@@ -295,6 +297,7 @@ def main() -> None:
             resultado=resultado_teste,
         )
     )
+    ARQUIVO_RESULTADOS.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(resultados_folds).to_csv(
         ARQUIVO_RESULTADOS,
         sep=";",

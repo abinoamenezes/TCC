@@ -78,7 +78,7 @@ Os objetivos específicos são:
 
 A abordagem principal utiliza XGBoost com codificação das variáveis categóricas, sobreamostragem da classe SAIU apenas no treinamento e seleção da quantidade de árvores por \textit{early stopping}. Aproximadamente 20\% da base permanecem intocados até o teste final. Os 80\% restantes são usados em uma validação cruzada estratificada e agrupada com cinco \textit{folds}. A estratificação procura preservar a proporção das classes; o agrupamento mantém atributos idênticos na mesma partição.
 
-Além do modelo principal, são avaliados XGBoost com peso na classe SAIU, sem duplicação de registros, e CatBoost com peso de classe e processamento nativo das características categóricas. Após a avaliação, contribuições SHAP são calculadas para o modelo XGBoost. Uma visão global resume padrões do conjunto, enquanto uma visão local mostra por que um caso específico recebeu determinada previsão. Uma LLM executada localmente pode converter ações previamente permitidas em uma frase curta para o RH, mas os números e fatores permanecem produzidos deterministicamente pelo programa.
+Além do modelo principal, são avaliados XGBoost com peso na classe SAIU, sem duplicação de registros, e CatBoost com peso de classe e processamento nativo das características categóricas. Após a avaliação, contribuições SHAP são calculadas para o modelo XGBoost. Uma visão global resume padrões do conjunto, enquanto uma visão local mostra por que um caso específico recebeu determinada previsão. Uma LLM executada localmente pode selecionar uma orientação curta entre ações previamente permitidas para o RH, mas os números e fatores permanecem produzidos deterministicamente pelo programa.
 
 \subsection{Contribuições}
 
@@ -210,7 +210,7 @@ No experimento ponderado, o XGBoost recebe peso positivo calculado apenas no tre
 
 As contribuições SHAP são calculadas no teste final. Para cada registro com probabilidade de saída maior ou igual a 50\%, o relatório apresenta os três maiores valores SHAP positivos e associa cada variável a um ponto de investigação previamente definido. Casos abaixo do limiar recebem apenas acompanhamento regular, evitando recomendar uma ação individual para toda a base.
 
-O componente de linguagem usa o modelo local Llama 3.2 de 3 bilhões de parâmetros, executado pelo Ollama. Para reduzir risco de alteração de números, a probabilidade, os fatores e os valores SHAP são inseridos por um texto determinístico. A LLM redige apenas uma orientação curta a partir de ações permitidas. Ela não tem acesso a nome, ID, classe real ou linha do funcionário, não participa da previsão e possui texto determinístico de contingência caso esteja indisponível.
+O componente de linguagem usa o modelo local Llama 3.2 de 3 bilhões de parâmetros, executado pelo Ollama. Para reduzir risco de alteração de números e afirmações não sustentadas, a probabilidade, os fatores e os valores SHAP são inseridos por um texto determinístico. A LLM seleciona uma orientação curta que deve corresponder literalmente a uma ação permitida; respostas fora dessa lista são rejeitadas. Ela não tem acesso a nome, ID, classe real ou linha do funcionário, não participa da previsão e possui texto determinístico de contingência caso esteja indisponível.
 
 Para uso prático, propõe-se organizar a interface em três níveis. O primeiro mostra o gráfico global. O segundo deve agrupar pessoas com combinações semelhantes de fatores, exibindo as características comuns uma única vez, quantidade de pessoas, risco médio e diferenças relevantes. O terceiro permite detalhar um caso. O segundo nível ainda é trabalho em andamento; portanto, os resultados atuais não devem ser descritos como um painel operacional completo.
 
@@ -344,7 +344,7 @@ A Figura~\ref{fig:shapglobal} apresenta a distribuição global das contribuiç�
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=\textwidth]{shap_summary_xgboost_kfold.png}
+\includegraphics[width=\textwidth]{resultados/shap_summary_xgboost_kfold.png}
 \caption{Impacto global das variáveis segundo valores SHAP.}
 \label{fig:shapglobal}
 \end{figure}
@@ -353,7 +353,7 @@ No caso individual de maior risco ilustrado na Figura~\ref{fig:shaplocal}, satis
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=\textwidth]{shap_maior_risco_xgboost_kfold.png}
+\includegraphics[width=\textwidth]{resultados/shap_maior_risco_xgboost_kfold.png}
 \caption{Contribuições SHAP locais de um registro de maior risco.}
 \label{fig:shaplocal}
 \end{figure}
@@ -368,12 +368,23 @@ No teste final, 694 das 3.000 pessoas foram sinalizadas. Entre os departamentos,
 
 \begin{figure}[ht]
 \centering
-\includegraphics[width=\textwidth]{comparativo_grupos_rh.png}
+\includegraphics[width=\textwidth]{resultados/comparativo_grupos_rh.png}
 \caption{Percentual de pessoas sinalizadas para investigação no conjunto de teste, por departamento e faixa salarial. Os rótulos apresentam casos sinalizados e tamanho de cada grupo.}
 \label{fig:comparativogrupos}
 \end{figure}
 
-A LLM deve ficar restrita ao detalhamento opcional. O protótipo já separa a parte numérica da redação: valores SHAP e probabilidades são inseridos pelo programa; a LLM local redige somente uma orientação. Essa decisão reduz, mas não elimina, risco de texto inadequado. Antes de uso real, profissionais de RH devem avaliar clareza, utilidade, consistência e possibilidade de interpretações discriminatórias.
+Para aprofundar a análise coletiva, também foi gerado um gráfico SHAP para cada departamento. Os gráficos utilizam todos os registros do respectivo setor no conjunto de teste, não somente as pessoas sinalizadas. Para cada variável original, a implementação soma primeiro as contribuições das categorias codificadas e calcula separadamente as médias dos impactos positivos e negativos. O eixo horizontal mantém a mesma escala em todos os departamentos, permitindo comparar magnitudes. A variável \texttt{Department} é omitida dessas figuras porque define os próprios grupos. A Figura~\ref{fig:shapdepartamento} exemplifica a visualização.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{resultados/shap_departamentos/shap_departamento_accounting.png}
+\caption{Contribuições SHAP médias, positivas e negativas, no departamento \texttt{accounting}. Valores em \textit{log-odds}; as duas direções podem ocorrer para uma mesma variável em pessoas diferentes.}
+\label{fig:shapdepartamento}
+\end{figure}
+
+Um relatório complementar apresenta os fatores que figuram entre os maiores impactos em todos os departamentos uma única vez. O resumo de cada setor destaca até duas características cujo impacto SHAP absoluto médio supera o dos demais setores. O número de pessoas sinalizadas é apresentado separadamente, pois o gráfico SHAP do departamento descreve o grupo inteiro. Essas diferenças são descritivas e não demonstram que o departamento causou as previsões ou os desligamentos.
+
+A LLM permanece opcional. Além das orientações individuais, ela pode selecionar, para cada departamento, uma frase de investigação a partir de uma lista previamente permitida. O programa valida se a resposta corresponde literalmente a um item dessa lista. Totais, percentuais e contribuições numéricas são inseridos pelo programa; a LLM não recebe linhas individuais nesse resumo coletivo. Se ela estiver indisponível ou produzir uma resposta fora do formato esperado, o texto por regras permanece disponível. Essa decisão reduz, mas não elimina, risco de orientação inadequada. Antes de uso real, profissionais de RH devem avaliar clareza, utilidade, consistência e possibilidade de interpretações discriminatórias.
 
 \subsection{Ameaças à validade}
 

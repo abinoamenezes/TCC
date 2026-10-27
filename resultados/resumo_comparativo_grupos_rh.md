@@ -20,6 +20,7 @@ Fatores entre os três maiores impactos SHAP positivos de todos os grupos com ca
 | technical | 545 | 126 | 23.12 | 25.84 | tempo de empresa |
 
 Fatores de destaque: características entre os três maiores impactos positivos do grupo que aparecem mais fortemente nele do que nos demais grupos com casos sinalizados. São associações do modelo, não causas comprovadas.
+
 ## Faixa salarial
 
 Fatores entre os três maiores impactos SHAP positivos de todos os grupos com casos sinalizados: nivel de satisfacao, quantidade de projetos.

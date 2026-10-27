@@ -8,14 +8,16 @@ Metodologia:
 5. Usa early stopping para escolher o numero de arvores em cada fold.
 6. Treina o modelo final com o numero mediano de arvores e avalia o teste uma vez.
 7. Usa SHAP para explicar os fatores de risco e sugerir investigacoes ao RH.
-8. Opcionalmente usa uma LLM apenas para redigir as explicacoes do SHAP.
+8. Opcionalmente usa uma LLM para selecionar orientacoes permitidas ao RH.
 """
 
 import json
 import os
+import re
 import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -69,14 +71,23 @@ LIMITE_EXPLICACOES_LLM = max(
     0,
     int(os.getenv("LIMITE_EXPLICACOES_LLM", "10")),
 )
-ARQUIVO_SHAP_GLOBAL = "shap_summary_xgboost_kfold.png"
-ARQUIVO_SHAP_LOCAL = "shap_maior_risco_xgboost_kfold.png"
-ARQUIVO_RELATORIO_RH = "relatorio_shap_funcionarios_kfold.csv"
-ARQUIVO_COMPARATIVO_GRUPOS = "comparativo_grupos_rh.csv"
-ARQUIVO_RESUMO_GRUPOS = "resumo_comparativo_grupos_rh.md"
-ARQUIVO_GRAFICO_GRUPOS = "comparativo_grupos_rh.png"
-ARQUIVO_MATRIZES_FOLDS = "matrizes_confusao_validacao_kfold.csv"
-ARQUIVO_PLANILHA_MATRIZES = "planilha_matrizes_confusao_folds.csv"
+LIMITE_RESUMOS_DEPARTAMENTO_LLM = max(
+    0,
+    int(os.getenv("LIMITE_RESUMOS_DEPARTAMENTO_LLM", "10")),
+)
+PASTA_RESULTADOS = Path("resultados")
+ARQUIVO_SHAP_GLOBAL = PASTA_RESULTADOS / "shap_summary_xgboost_kfold.png"
+ARQUIVO_SHAP_LOCAL = PASTA_RESULTADOS / "shap_maior_risco_xgboost_kfold.png"
+ARQUIVO_RELATORIO_RH = PASTA_RESULTADOS / "relatorio_shap_funcionarios_kfold.csv"
+ARQUIVO_COMPARATIVO_GRUPOS = PASTA_RESULTADOS / "comparativo_grupos_rh.csv"
+ARQUIVO_RESUMO_GRUPOS = PASTA_RESULTADOS / "resumo_comparativo_grupos_rh.md"
+ARQUIVO_GRAFICO_GRUPOS = PASTA_RESULTADOS / "comparativo_grupos_rh.png"
+PASTA_SHAP_DEPARTAMENTOS = PASTA_RESULTADOS / "shap_departamentos"
+ARQUIVO_ANALISE_DEPARTAMENTOS = PASTA_RESULTADOS / "analise_shap_departamentos_rh.csv"
+ARQUIVO_DETALHES_DEPARTAMENTOS = PASTA_RESULTADOS / "detalhes_shap_departamentos.csv"
+ARQUIVO_RESUMO_DEPARTAMENTOS = PASTA_RESULTADOS / "resumo_shap_departamentos_rh.md"
+ARQUIVO_MATRIZES_FOLDS = PASTA_RESULTADOS / "matrizes_confusao_validacao_kfold.csv"
+ARQUIVO_PLANILHA_MATRIZES = PASTA_RESULTADOS / "planilha_matrizes_confusao_folds.csv"
 
 
 # As recomendacoes indicam o que deve ser investigado. SHAP mostra associacoes
@@ -229,6 +240,21 @@ def identificar_variavel_original(nome_transformado: str, colunas_originais) -> 
     return nome_limpo
 
 
+def agregar_shap_por_variavel_original(
+    X_original: pd.DataFrame,
+    valores_shap: np.ndarray,
+    nomes_transformados: list[str],
+) -> tuple[list[str], np.ndarray]:
+    """Soma contribuicoes one-hot antes de comparar variaveis originais."""
+    variaveis = list(X_original.columns)
+    posicoes = {nome: indice for indice, nome in enumerate(variaveis)}
+    impactos = np.zeros((len(X_original), len(variaveis)), dtype=float)
+    for indice_coluna, nome in enumerate(nomes_transformados):
+        variavel = identificar_variavel_original(nome, variaveis)
+        impactos[:, posicoes[variavel]] += valores_shap[:, indice_coluna]
+    return variaveis, impactos
+
+
 def converter_valor_json(valor):
     """Converte escalares do NumPy em tipos aceitos pelo JSON da API."""
     if isinstance(valor, np.generic):
@@ -361,14 +387,10 @@ def adicionar_descricoes_llm(relatorio: pd.DataFrame) -> pd.DataFrame:
         return relatorio
 
     instrucoes = (
-        "Voce redige uma unica frase curta e profissional de orientacao para o setor "
-        "de RH, em portugues do Brasil. Use exclusivamente os itens existentes em "
-        "pontos_permitidos_para_investigacao. Apresente-os como possibilidades de "
-        "investigacao humana, nunca como uma decisao automatica. Nao mencione nem "
-        "interprete probabilidades, valores das variaveis ou impactos SHAP, pois esses "
-        "dados serao acrescentados de forma deterministica pelo programa. Nao invente "
-        "informacoes, nao afirme causalidade, nao faca diagnosticos e nao recomende "
-        "demissao, punicao ou negativa de promocao."
+        "Escolha uma unica frase da lista pontos_permitidos_para_investigacao "
+        "que se relacione aos fatores SHAP informados. Copie a frase escolhida "
+        "literalmente no campo descricao, sem acrescentar, alterar ou interpretar "
+        "qualquer palavra."
     )
     try:
         gerador_llm, fonte_llm, modelo_em_uso = criar_gerador_llm(instrucoes)
@@ -382,6 +404,7 @@ def adicionar_descricoes_llm(relatorio: pd.DataFrame) -> pd.DataFrame:
 
     cache: dict[str, str] = {}
     chamadas_realizadas = 0
+    descricoes_geradas = 0
     falha_llm = False
 
     for indice, registro in relatorio.iterrows():
@@ -389,10 +412,9 @@ def adicionar_descricoes_llm(relatorio: pd.DataFrame) -> pd.DataFrame:
             continue
 
         dados = {
-            "probabilidade_saida_percentual": float(
-                registro["probabilidade_saida_percentual"]
-            ),
-            "fatores_que_aumentaram_a_previsao": registro["_fatores_estruturados"],
+            "fatores_que_aumentaram_a_previsao": [
+                fator["rotulo"] for fator in registro["_fatores_estruturados"]
+            ],
             "pontos_permitidos_para_investigacao": registro[
                 "_recomendacoes_estruturadas"
             ],
@@ -401,7 +423,11 @@ def adicionar_descricoes_llm(relatorio: pd.DataFrame) -> pd.DataFrame:
         chave_cache = dados_json
 
         if chave_cache in cache:
-            relatorio.at[indice, "descricao_para_rh"] = cache[chave_cache]
+            descricao_base = relatorio.at[indice, "descricao_para_rh"]
+            relatorio.at[indice, "descricao_para_rh"] = (
+                f"{descricao_base} Ponto selecionado pela LLM para investigacao: "
+                f"{cache[chave_cache]}"
+            )
             relatorio.at[indice, "fonte_descricao"] = f"{fonte_llm}_CACHE"
             continue
 
@@ -412,15 +438,22 @@ def adicionar_descricoes_llm(relatorio: pd.DataFrame) -> pd.DataFrame:
             continue
 
         try:
-            complemento_llm = gerador_llm(dados_json)
+            chamadas_realizadas += 1
+            complemento_llm = gerador_llm(dados_json).strip()
+            if complemento_llm not in registro["_recomendacoes_estruturadas"]:
+                relatorio.at[indice, "fonte_descricao"] = "FALLBACK_FORMATO_LLM"
+                continue
             descricao_base = relatorio.at[indice, "descricao_para_rh"]
             descricao = (
-                f"{descricao_base} Orientacao redigida pela LLM: {complemento_llm}"
+                f"{descricao_base} Ponto selecionado pela LLM para investigacao: "
+                f"{complemento_llm}"
             )
-            cache[chave_cache] = descricao
+            cache[chave_cache] = complemento_llm
             relatorio.at[indice, "descricao_para_rh"] = descricao
             relatorio.at[indice, "fonte_descricao"] = fonte_llm
-            chamadas_realizadas += 1
+            descricoes_geradas += 1
+        except ValueError:
+            relatorio.at[indice, "fonte_descricao"] = "FALLBACK_FORMATO_LLM"
         except Exception as erro:
             falha_llm = True
             relatorio.at[indice, "fonte_descricao"] = "FALLBACK_ERRO_LLM"
@@ -430,7 +463,8 @@ def adicionar_descricoes_llm(relatorio: pd.DataFrame) -> pd.DataFrame:
             )
 
     print(
-        f"Descricoes unicas geradas pela LLM: {chamadas_realizadas} | "
+        f"Descricoes unicas geradas pela LLM: {descricoes_geradas} "
+        f"de {chamadas_realizadas} chamadas | "
         f"provedor: {PROVEDOR_LLM} | modelo: {modelo_em_uso}"
     )
     return relatorio
@@ -443,11 +477,9 @@ def gerar_comparativo_grupos(
     nomes_transformados: list[str],
 ) -> None:
     """Compara grupos no teste final, sem gerar textos individuais repetidos."""
-    variaveis = list(X_teste_original.columns)
-    impactos_por_variavel = np.zeros((len(X_teste_original), len(variaveis)))
-    for indice_coluna, nome in enumerate(nomes_transformados):
-        variavel = identificar_variavel_original(nome, variaveis)
-        impactos_por_variavel[:, variaveis.index(variavel)] += valores_shap[:, indice_coluna]
+    variaveis, impactos_por_variavel = agregar_shap_por_variavel_original(
+        X_teste_original, valores_shap, nomes_transformados
+    )
     # Primeiro agrega as colunas one-hot; so depois considera o impacto positivo.
     impactos_positivos = np.maximum(impactos_por_variavel, 0)
     em_risco = probabilidades >= LIMIAR_ACAO_RH
@@ -615,6 +647,291 @@ def gerar_comparativo_grupos(
     print(f"Grafico comparativo: {ARQUIVO_GRAFICO_GRUPOS}")
 
 
+def adicionar_resumos_departamento_llm(relatorio: pd.DataFrame) -> pd.DataFrame:
+    """Seleciona uma orientacao permitida por departamento com dados agregados."""
+    relatorio = relatorio.copy()
+    relatorio["fonte_resumo"] = "TEXTO_DETERMINISTICO"
+    if not USAR_LLM:
+        return relatorio
+    if LIMITE_RESUMOS_DEPARTAMENTO_LLM == 0:
+        relatorio["fonte_resumo"] = "FALLBACK_LIMITE_ZERO"
+        return relatorio
+
+    instrucoes = (
+        "Escolha uma unica frase da lista pontos_permitidos_para_investigacao que "
+        "se relacione aos fatores SHAP informados. Priorize um fator que diferencia "
+        "o departamento; se nao houver, use um fator positivo dos casos "
+        "sinalizados. Copie a frase escolhida literalmente no campo descricao, "
+        "sem acrescentar, alterar ou interpretar qualquer palavra."
+    )
+    try:
+        gerador_llm, fonte_llm, modelo_em_uso = criar_gerador_llm(instrucoes)
+    except Exception as erro:
+        relatorio["fonte_resumo"] = "FALLBACK_CONFIGURACAO_LLM"
+        print(f"Resumo por departamento manteve texto por regras: {erro}")
+        return relatorio
+
+    chamadas = 0
+    resumos_gerados = 0
+    falha_llm = False
+    for indice, registro in relatorio.iterrows():
+        if falha_llm or chamadas >= LIMITE_RESUMOS_DEPARTAMENTO_LLM:
+            relatorio.at[indice, "fonte_resumo"] = (
+                "FALLBACK_ERRO_LLM" if falha_llm else "FALLBACK_LIMITE_LLM"
+            )
+            continue
+        dados = {
+            "departamento": registro["departamento"],
+            "fatores_que_diferenciam_o_departamento": [
+                fator["rotulo"] for fator in registro["_fatores_diferenciais"]
+            ],
+            "fatores_positivos_nos_casos_sinalizados": [
+                fator["rotulo"] for fator in registro["_fatores_risco"]
+            ],
+            "pontos_permitidos_para_investigacao": registro["_acoes_permitidas"],
+        }
+        if not registro["_acoes_permitidas"]:
+            relatorio.at[indice, "fonte_resumo"] = "FALLBACK_SEM_ACAO"
+            continue
+        try:
+            chamadas += 1
+            frase = gerador_llm(json.dumps(dados, ensure_ascii=False, sort_keys=True)).strip()
+            if frase not in registro["_acoes_permitidas"]:
+                relatorio.at[indice, "fonte_resumo"] = "FALLBACK_FORMATO_LLM"
+                continue
+            relatorio.at[indice, "resumo_para_rh"] += (
+                f" Ponto selecionado pela LLM para investigação: {frase}"
+            )
+            relatorio.at[indice, "fonte_resumo"] = fonte_llm
+            resumos_gerados += 1
+        except ValueError:
+            relatorio.at[indice, "fonte_resumo"] = "FALLBACK_FORMATO_LLM"
+        except Exception as erro:
+            falha_llm = True
+            relatorio.at[indice, "fonte_resumo"] = "FALLBACK_ERRO_LLM"
+            print(
+                "Resumo por departamento manteve texto por regras. "
+                f"Tipo do erro: {type(erro).__name__}."
+            )
+
+    print(
+        f"Resumos de departamentos gerados pela LLM: {resumos_gerados} "
+        f"de {chamadas} chamadas | "
+        f"provedor: {PROVEDOR_LLM} | modelo: {modelo_em_uso}"
+    )
+    return relatorio
+
+
+def gerar_shap_departamentos(
+    X_teste_original: pd.DataFrame,
+    probabilidades: np.ndarray,
+    valores_shap: np.ndarray,
+    nomes_transformados: list[str],
+) -> None:
+    """Gera graficos SHAP do setor inteiro e uma explicacao agregada por setor."""
+    if "Department" not in X_teste_original.columns:
+        return
+    variaveis, impactos = agregar_shap_por_variavel_original(
+        X_teste_original, valores_shap, nomes_transformados
+    )
+    elegiveis = [i for i, nome in enumerate(variaveis) if nome != "Department"]
+    departamentos = X_teste_original["Department"].astype(str).to_numpy()
+    em_risco = probabilidades >= LIMIAR_ACAO_RH
+    PASTA_SHAP_DEPARTAMENTOS.mkdir(parents=True, exist_ok=True)
+    registros = []
+    dados_graficos = []
+    detalhes = []
+
+    for departamento in sorted(np.unique(departamentos)):
+        mascara = departamentos == departamento
+        mascara_risco = mascara & em_risco
+        n_pessoas = int(np.count_nonzero(mascara))
+        n_risco = int(np.count_nonzero(mascara_risco))
+        impactos_grupo = impactos[mascara]
+        medias_positivas = np.maximum(impactos_grupo, 0).mean(axis=0)
+        medias_negativas = np.minimum(impactos_grupo, 0).mean(axis=0)
+        medias_absolutas = np.abs(impactos_grupo).mean(axis=0)
+        ordem = sorted(elegiveis, key=lambda i: medias_absolutas[i], reverse=True)
+        fatores_gerais = [
+            {
+                "variavel": variaveis[i],
+                "rotulo": ROTULOS_VARIAVEIS_RH.get(variaveis[i], variaveis[i]),
+                "shap_absoluto_medio": round(float(medias_absolutas[i]), 3),
+                "shap_positivo_medio": round(float(medias_positivas[i]), 3),
+                "shap_negativo_medio": round(float(medias_negativas[i]), 3),
+            }
+            for i in ordem[:3]
+        ]
+        medias_outros = np.abs(impactos[~mascara]).mean(axis=0)
+        for i in elegiveis:
+            detalhes.append({
+                "departamento": departamento,
+                "pessoas": n_pessoas,
+                "variavel": variaveis[i],
+                "shap_absoluto_medio": round(float(medias_absolutas[i]), 3),
+                "shap_positivo_medio": round(float(medias_positivas[i]), 3),
+                "shap_negativo_medio": round(float(medias_negativas[i]), 3),
+                "diferenca_shap_absoluto_vs_outros": round(
+                    float(medias_absolutas[i] - medias_outros[i]), 3
+                ),
+            })
+        if n_risco:
+            medias_risco = np.maximum(impactos[mascara_risco], 0).mean(axis=0)
+            ordem_risco = sorted(elegiveis, key=lambda i: medias_risco[i], reverse=True)
+            fatores_risco = [
+                {
+                    "variavel": variaveis[i],
+                    "rotulo": ROTULOS_VARIAVEIS_RH.get(variaveis[i], variaveis[i]),
+                    "shap_positivo_medio": round(float(medias_risco[i]), 3),
+                }
+                for i in ordem_risco if medias_risco[i] > 0
+            ][:3]
+        else:
+            fatores_risco = []
+        top_gerais = ", ".join(fator["rotulo"] for fator in fatores_gerais)
+        top_risco = ", ".join(fator["rotulo"] for fator in fatores_risco)
+        nome_seguro = re.sub(r"[^A-Za-z0-9_-]+", "_", departamento)
+        caminho_grafico = PASTA_SHAP_DEPARTAMENTOS / f"shap_departamento_{nome_seguro}.png"
+        registros.append({
+            "departamento": departamento,
+            "pessoas": n_pessoas,
+            "casos_sinalizados": n_risco,
+            "percentual_sinalizado": round(n_risco / n_pessoas * 100, 3),
+            "fatores_shap_gerais": top_gerais,
+            "fatores_diferenciais": "",
+            "fatores_positivos_sinalizados": top_risco,
+            "grafico_shap": caminho_grafico.relative_to(PASTA_RESULTADOS).as_posix(),
+            "resumo_para_rh": "",
+            "_fatores_gerais": fatores_gerais,
+            "_fatores_diferenciais": [],
+            "_fatores_risco": fatores_risco,
+            "_acoes_permitidas": [],
+        })
+        dados_graficos.append((departamento, caminho_grafico, n_pessoas, n_risco,
+                               ordem[:8], medias_positivas, medias_negativas))
+
+    comuns = set.intersection(*(
+        {fator["variavel"] for fator in registro["_fatores_gerais"]}
+        for registro in registros
+    )) if len(registros) > 1 else set()
+    nomes_comuns = [ROTULOS_VARIAVEIS_RH.get(nome, nome) for nome in sorted(comuns)]
+    for registro in registros:
+        detalhes_grupo = sorted(
+            (linha for linha in detalhes if linha["departamento"] == registro["departamento"]),
+            key=lambda linha: linha["shap_absoluto_medio"],
+            reverse=True,
+        )[:5]
+        diferenciais = sorted(
+            (
+                linha for linha in detalhes_grupo
+                if linha["variavel"] not in comuns
+                and linha["diferenca_shap_absoluto_vs_outros"] > 0
+            ),
+            key=lambda linha: linha["diferenca_shap_absoluto_vs_outros"],
+            reverse=True,
+        )[:2]
+        registro["_fatores_diferenciais"] = [
+            {
+                "variavel": linha["variavel"],
+                "rotulo": ROTULOS_VARIAVEIS_RH.get(linha["variavel"], linha["variavel"]),
+                "diferenca_shap_absoluto_medio": linha["diferenca_shap_absoluto_vs_outros"],
+            }
+            for linha in diferenciais
+        ]
+        registro["fatores_diferenciais"] = ", ".join(
+            fator["rotulo"] for fator in registro["_fatores_diferenciais"]
+        ) or "sem destaque"
+        registro["_acoes_permitidas"] = list(dict.fromkeys(
+            RECOMENDACOES_RH[fator["variavel"]]
+            for fator in registro["_fatores_diferenciais"] + registro["_fatores_risco"]
+            if fator["variavel"] in RECOMENDACOES_RH
+        ))[:3]
+        diferencas = registro["fatores_diferenciais"]
+        trecho_diferencas = (
+            f"Maiores diferenças de impacto SHAP em relação aos demais setores: "
+            f"{diferencas}."
+            if diferencas != "sem destaque" else
+            "Nenhuma das principais variáveis teve impacto médio maior que nos "
+            "demais setores."
+        )
+        registro["resumo_para_rh"] = (
+            f"{registro['departamento']}: {registro['pessoas']} pessoas; "
+            f"{registro['casos_sinalizados']} sinalizadas "
+            f"({registro['percentual_sinalizado']:.2f}%). {trecho_diferencas}"
+        )
+
+    # A mesma escala horizontal permite comparar as magnitudes entre setores.
+    escala = max(
+        0.1,
+        max(
+            max(abs(float(positivos[i])), abs(float(negativos[i])))
+            for _, _, _, _, indices, positivos, negativos in dados_graficos
+            for i in indices
+        ) * 1.2,
+    )
+    for departamento, caminho, n_pessoas, n_risco, indices, positivos, negativos in dados_graficos:
+        indices = list(reversed(indices))
+        rotulos = [ROTULOS_VARIAVEIS_RH.get(variaveis[i], variaveis[i]) for i in indices]
+        posicoes = np.arange(len(indices))
+        figura, eixo = plt.subplots(figsize=(10, 5.6))
+        eixo.barh(posicoes, [negativos[i] for i in indices], color="#2878a6",
+                  label="Reduz a previsão de saída")
+        eixo.barh(posicoes, [positivos[i] for i in indices], color="#c34439",
+                  label="Eleva a previsão de saída")
+        eixo.set_yticks(posicoes, rotulos)
+        eixo.set_xlim(-escala, escala)
+        eixo.axvline(0, color="black", linewidth=0.8)
+        eixo.set_xlabel("Contribuição SHAP média por pessoa (log-odds)")
+        eixo.set_title(
+            f"SHAP no departamento {departamento} | {n_pessoas} pessoas | "
+            f"{n_risco} sinalizadas"
+        )
+        eixo.grid(axis="x", alpha=0.2)
+        eixo.legend(loc="lower right", fontsize=8)
+        figura.tight_layout()
+        figura.savefig(caminho, dpi=200, bbox_inches="tight")
+        plt.close(figura)
+
+    relatorio = adicionar_resumos_departamento_llm(pd.DataFrame(registros))
+    relatorio.drop(
+        columns=["_fatores_gerais", "_fatores_diferenciais", "_fatores_risco", "_acoes_permitidas"]
+    ).to_csv(ARQUIVO_ANALISE_DEPARTAMENTOS, index=False, encoding="utf-8-sig")
+    pd.DataFrame(detalhes).to_csv(
+        ARQUIVO_DETALHES_DEPARTAMENTOS, index=False, encoding="utf-8-sig"
+    )
+    secoes = [
+        "# Análise SHAP por departamento",
+        "",
+        "Base: conjunto de teste final. Os gráficos usam todas as pessoas de cada "
+        "departamento; os fatores positivos dos casos sinalizados são descritos "
+        "separadamente. Valores SHAP estão em log-odds. A variável Department "
+        "foi omitida dos gráficos porque define os próprios grupos. O escore "
+        "não foi calibrado como taxa observada de saída e SHAP não prova causalidade.",
+        "",
+        "Fatores entre os três maiores impactos SHAP absolutos em todos os "
+        "departamentos (mostrados uma vez): "
+        + (", ".join(nomes_comuns) if nomes_comuns else "nenhum fator comum identificado")
+        + ".",
+        "",
+    ]
+    for _, registro in relatorio.iterrows():
+        secoes.extend([
+            f"## {registro['departamento']}",
+            "",
+            registro["resumo_para_rh"],
+            "",
+            f"[Ver gráfico SHAP]({registro['grafico_shap']}) "
+            f"— fonte do texto: {registro['fonte_resumo']}.",
+            "",
+        ])
+    with open(ARQUIVO_RESUMO_DEPARTAMENTOS, "w", encoding="utf-8") as arquivo:
+        arquivo.write("\n".join(secoes).rstrip() + "\n")
+    print(f"Graficos SHAP por departamento: {PASTA_SHAP_DEPARTAMENTOS}")
+    print(f"Analise dos departamentos: {ARQUIVO_ANALISE_DEPARTAMENTOS}")
+    print(f"Detalhes numericos: {ARQUIVO_DETALHES_DEPARTAMENTOS}")
+    print(f"Resumo para o RH: {ARQUIVO_RESUMO_DEPARTAMENTOS}")
+
+
 def gerar_explicacoes_shap(
     modelo,
     preprocessador,
@@ -686,6 +1003,12 @@ def gerar_explicacoes_shap(
     probabilidades = modelo.predict_proba(X_teste_transformado)[:, 1]
     previsoes = modelo.predict(X_teste_transformado)
     gerar_comparativo_grupos(
+        X_teste_original,
+        probabilidades,
+        valores_shap,
+        nomes_transformados,
+    )
+    gerar_shap_departamentos(
         X_teste_original,
         probabilidades,
         valores_shap,
@@ -832,13 +1155,15 @@ def gerar_explicacoes_shap(
     print(f"Acoes sugeridas: {registro_maior_risco['acoes_para_o_rh_investigar']}")
     print(f"Descricao para o RH: {registro_maior_risco['descricao_para_rh']}")
     print(
-        "Aviso: SHAP explica a previsao do modelo; a LLM apenas redige o texto; "
+        "Aviso: SHAP explica a previsao do modelo; a LLM apenas seleciona "
+        "um ponto de investigacao permitido; "
         "as acoes sao pontos para "
         "investigacao humana e nao garantem que a saida sera evitada."
     )
 
 
 def main() -> None:
+    PASTA_RESULTADOS.mkdir(exist_ok=True)
     df = pd.read_csv(BASE_DADOS)
     X = df.drop(columns=[ALVO])
     y = df[ALVO]

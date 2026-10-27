@@ -5,6 +5,8 @@ comparacao justa. As variaveis categoricas sao processadas nativamente pelo
 CatBoost, sem one-hot encoding e sem RandomOverSampler.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier
@@ -26,7 +28,7 @@ RANDOM_STATE = 42
 NUM_FOLDS = 5
 MAX_ITERACOES = 1000
 EARLY_STOPPING = 30
-ARQUIVO_RESULTADOS = "resultados_catboost_kfold.csv"
+ARQUIVO_RESULTADOS = Path("resultados/experimentos/resultados_catboost_kfold.csv")
 
 
 def colunas_categoricas(X: pd.DataFrame) -> list[str]:
@@ -279,6 +281,7 @@ def main() -> None:
             resultado=resultado_teste,
         )
     )
+    ARQUIVO_RESULTADOS.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(resultados_folds).to_csv(
         ARQUIVO_RESULTADOS,
         sep=";",
